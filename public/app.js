@@ -1,0 +1,431 @@
+/* Number Guessing — vanilla client.
+ * Realtime contract: SSE events are cache-invalidation hints only — the
+ * server sends NAMED events (hello, lobby.updated, invite.updated,
+ * game.updated), each of which triggers a full GET /api/state refetch, so
+ * reconnects and missed events self-heal. Note: `onmessage` fires only for
+ * events without an `event:` field, so every named type is registered via
+ * addEventListener in connectEvents(). */
+
+const TOKEN_KEY = "number-guessing.token";
+const $ = (id) => document.getElementById(id);
+
+const els = {
+  meChip: $("me-chip"),
+  flash: $("flash"),
+  viewRegister: $("view-register"),
+  viewLobby: $("view-lobby"),
+  viewGame: $("view-game"),
+  userList: $("user-list"),
+  noUsers: $("no-users"),
+  invitesIn: $("invites-in"),
+  noInvitesIn: $("no-invites-in"),
+  invitesOut: $("invites-out"),
+  noInvitesOut: $("no-invites-out"),
+  gameList: $("game-list"),
+  noGames: $("no-games"),
+  gameBoard: $("game-board"),
+};
+
+let token = localStorage.getItem(TOKEN_KEY);
+let state = null; // last /api/state snapshot
+let selectedGameId = null;
+let eventSource = null;
+let pollTimer = null;
+let flashTimer = null;
+
+/* ------------------------------ plumbing -------------------------------- */
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function signedOut() {
+  // token invalid/expired (e.g. server restarted): back to a clean register
+  token = null;
+  localStorage.removeItem(TOKEN_KEY);
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+  }
+  stopPolling();
+  els.meChip.hidden = true;
+  showView("register");
+}
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: body === undefined ? "GET" : "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    /* non-JSON (shouldn't happen on /api) */
+  }
+  if (!res.ok) {
+    if (res.status === 401 && token) signedOut();
+    const msg = data?.error?.message || `Request failed (${res.status})`;
+    throw new Error(msg);
+  }
+  return data;
+}
+
+function flash(message, ok = false) {
+  els.flash.textContent = message;
+  els.flash.classList.toggle("ok", ok);
+  els.flash.hidden = false;
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => {
+    els.flash.hidden = true;
+  }, 3000);
+}
+
+function guard(fn) {
+  return async (...args) => {
+    try {
+      await fn(...args);
+    } catch (err) {
+      flash(err.message);
+      await refresh().catch(() => {}); // server may have moved on; resync
+    }
+  };
+}
+
+const esc = (s) =>
+  String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+  );
+
+/* ------------------------------ realtime -------------------------------- */
+
+const SSE_EVENTS = ["hello", "lobby.updated", "invite.updated", "game.updated"];
+
+function connectEvents() {
+  if (eventSource) eventSource.close();
+  stopPolling();
+  if (!token) return;
+  eventSource = new EventSource(`/api/events[REDACTED:url_query_credential]`);
+  const onEvent = () => refresh().catch(() => {});
+  // Named events never reach `onmessage` — register each type explicitly.
+  for (const type of SSE_EVENTS) eventSource.addEventListener(type, onEvent);
+  eventSource.onmessage = onEvent; // unnamed events, should the server add any
+  eventSource.onopen = stopPolling;
+  eventSource.onerror = () => {
+    // EventSource auto-reconnects; when it gives up, poll as a degraded path.
+    if (eventSource?.readyState === EventSource.CLOSED && !pollTimer) {
+      pollTimer = setInterval(() => refresh().catch(() => {}), 5000);
+    }
+  };
+}
+
+async function refresh() {
+  state = await api("/api/state");
+  render();
+}
+
+/* -------------------------------- views ---------------------------------- */
+
+function showView(name) {
+  els.viewRegister.hidden = name !== "register";
+  els.viewLobby.hidden = name !== "lobby";
+  els.viewGame.hidden = name !== "game";
+}
+
+function render() {
+  if (!state) return;
+  renderMeChip();
+  if (selectedGameId && state.games.some((g) => g.id === selectedGameId)) {
+    renderGame(state.games.find((g) => g.id === selectedGameId));
+    showView("game");
+  } else {
+    selectedGameId = null;
+    renderLobby();
+    showView("lobby");
+  }
+}
+
+function renderMeChip() {
+  els.meChip.hidden = false;
+  els.meChip.innerHTML =
+    `<span class="name">${esc(state.me.username)}</span>` +
+    `<span class="num">#${state.me.userId}</span>` +
+    `<button class="small ghost" id="btn-signout" type="button" title="Forget this device">Sign out</button>`;
+  $("btn-signout").addEventListener("click", () => {
+    signedOut();
+  });
+}
+
+/* -------------------------------- lobby ---------------------------------- */
+
+function renderLobby() {
+  els.userList.innerHTML = "";
+  els.noUsers.hidden = state.users.length > 0;
+  for (const u of state.users) {
+    const li = document.createElement("li");
+    li.innerHTML =
+      `<span class="dot ${u.online ? "online" : ""}" title="${u.online ? "online" : "offline"}"></span>` +
+      `<span class="grow">${esc(u.username)}</span>` +
+      `<span class="num">#${u.userId}</span>`;
+    const btn = document.createElement("button");
+    btn.className = "small";
+    btn.type = "button";
+    btn.textContent = "Invite";
+    btn.addEventListener("click", guard(async () => {
+      await api("/api/invite", { to: u.username });
+      flash(`Invite sent to ${u.username}`, true);
+      await refresh();
+    }));
+    li.append(btn);
+    els.userList.append(li);
+  }
+
+  els.invitesIn.innerHTML = "";
+  els.noInvitesIn.hidden = state.incomingInvites.length > 0;
+  for (const inv of state.incomingInvites) {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="grow">from <b>${esc(inv.from.username)}</b> <span class="num">#${inv.from.userId}</span></span>`;
+    const accept = document.createElement("button");
+    accept.className = "small";
+    accept.type = "button";
+    accept.textContent = "Accept";
+    accept.addEventListener("click", guard(async () => {
+      await api("/api/invite/respond", { inviteId: inv.id, accept: true });
+      await refresh();
+    }));
+    const decline = document.createElement("button");
+    decline.className = "small secondary";
+    decline.type = "button";
+    decline.textContent = "Decline";
+    decline.addEventListener("click", guard(async () => {
+      await api("/api/invite/respond", { inviteId: inv.id, accept: false });
+      await refresh();
+    }));
+    li.append(accept, decline);
+    els.invitesIn.append(li);
+  }
+
+  els.invitesOut.innerHTML = "";
+  els.noInvitesOut.hidden = state.outgoingInvites.length > 0;
+  for (const inv of state.outgoingInvites) {
+    const li = document.createElement("li");
+    li.innerHTML =
+      `<span class="grow">to <b>${esc(inv.to.username)}</b> <span class="num">#${inv.to.userId}</span> — waiting</span>`;
+    const cancel = document.createElement("button");
+    cancel.className = "small secondary";
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", guard(async () => {
+      await api("/api/invite/respond", { inviteId: inv.id, accept: false });
+      await refresh();
+    }));
+    li.append(cancel);
+    els.invitesOut.append(li);
+  }
+
+  els.gameList.innerHTML = "";
+  els.noGames.hidden = state.games.length > 0;
+  for (const g of state.games) {
+    const li = document.createElement("li");
+    const label =
+      g.phase === "setup" ? "setting sequences"
+      : g.phase === "playing" ? (g.turn === "me" ? "your turn" : `${g.opponent.username} to move`)
+      : g.winner === "me" ? "you won"
+      : "you lost";
+    li.innerHTML =
+      `<span class="grow">vs <b>${esc(g.opponent.username)}</b> <span class="num">#${g.opponent.userId}</span></span>` +
+      `<span class="num">${esc(label)}</span>`;
+    const open = document.createElement("button");
+    open.className = "small";
+    open.type = "button";
+    open.textContent = "Open";
+    open.addEventListener("click", () => {
+      selectedGameId = g.id;
+      render();
+    });
+    li.append(open);
+    els.gameList.append(li);
+  }
+}
+
+/* -------------------------------- game ----------------------------------- */
+
+function digitTile(d, mark = "plain", sm = false) {
+  return `<span class="digit ${sm ? "sm " : ""}${mark}">${d}</span>`;
+}
+
+function tilesOf(seq, marks, sm = false) {
+  return `<span class="digits-cell">${seq
+    .map((d, i) => digitTile(d, marks ? marks[i] : "plain", sm))
+    .join("")}</span>`;
+}
+
+function renderGame(game) {
+  const g = game;
+
+  // The board is rebuilt via innerHTML; keep whatever the player has typed
+  // (and their focus) across refreshes that arrive mid-typing.
+  const prevGuess = $("input-guess");
+  const typedGuess = prevGuess ? prevGuess.value : "";
+  const guessHadFocus = document.activeElement?.id === "input-guess";
+
+  const head = `
+    <div class="game-head">
+      <h2>vs ${esc(g.opponent.username)} <span class="num">#${g.opponent.userId}</span></h2>
+      <span class="phase-chip">${g.phase === "setup" ? "Setup" : g.phase === "playing" ? "Playing" : "Finished"}</span>
+    </div>`;
+
+  let body = "";
+
+  if (g.phase === "setup") {
+    body += g.mySetup
+      ? `<p>Your sequence is set: <span class="secret-tiles">${g.mySecret.map((d) => digitTile(d, "plain")).join("")}</span></p>
+         <p class="muted">${g.opponentSetup ? "Starting…" : `Waiting for ${esc(g.opponent.username)} to choose a sequence…`}</p>`
+      : `<h3>Choose your secret sequence</h3>
+         <p class="muted">4 digits, 0–9. Repeats allowed, leading zeros count.</p>
+         <div class="secret-row">
+           <input id="input-secret" type="text" class="digits" inputmode="numeric" maxlength="4"
+                  pattern="\\d{4}" placeholder="0000" autocomplete="off" />
+           <button id="btn-secret-manual" type="button">Set</button>
+           <button id="btn-secret-random" class="secondary" type="button">🎲 Random</button>
+         </div>`;
+  }
+
+  if (g.phase === "playing") {
+    body += g.turn === "me"
+      ? `<div class="turn-banner mine">Your turn — guess ${esc(g.opponent.username)}'s sequence.</div>
+         <div class="guess-row">
+           <input id="input-guess" type="text" class="digits" inputmode="numeric" maxlength="4"
+                  pattern="\\d{4}" placeholder="0000" autocomplete="off" />
+           <button id="btn-guess" type="button">Guess</button>
+           <span class="muted">Your secret: <span class="secret-tiles">${g.mySecret.map((d) => digitTile(d, "plain", true)).join("")}</span></span>
+         </div>`
+      : `<div class="turn-banner theirs">${esc(g.opponent.username)} is guessing… <span class="muted">(${g.opponentGuessCount} guesses so far)</span></div>`;
+  }
+
+  if (g.phase === "finished") {
+    body += g.winner === "me"
+      ? `<div class="banner win">🏆 You cracked their sequence!</div>`
+      : `<div class="banner lose">💥 ${esc(g.opponent.username)} cracked yours first.</div>`;
+    body += `<div class="reveal">
+        <div class="side"><h4>Their sequence was</h4><span class="secret-tiles">${g.opponentSecret.map((d) => digitTile(d, "plain")).join("")}</span></div>
+        <div class="side"><h4>Your sequence was</h4><span class="secret-tiles">${g.mySecret.map((d) => digitTile(d, "plain")).join("")}</span></div>
+      </div>`;
+  }
+
+  let history = "";
+  if (g.myHistory.length > 0) {
+    history = `<table class="results">
+      <thead><tr>
+        <th>#</th><th>Guess</th>
+        <th title="Right digit, right place">✔ Correct place</th>
+        <th title="Right digit, wrong place">➜ Wrong place</th>
+        <th title="Not in their sequence">✖ Incorrect</th>
+      </tr></thead>
+      <tbody>${g.myHistory
+        .map(
+          (row, i) => `<tr>
+            <td>${i + 1}</td>
+            <td>${tilesOf(row.guess, row.marks, true)}</td>
+            <td class="c-ok">${row.counts.correct}</td>
+            <td class="c-part">${row.counts.misplaced}</td>
+            <td class="c-none">${row.counts.incorrect}</td>
+          </tr>`
+        )
+        .join("")}</tbody></table>`;
+  }
+
+  els.gameBoard.innerHTML = head + body + history;
+
+  if (typedGuess) {
+    const input = $("input-guess");
+    if (input) {
+      input.value = typedGuess;
+      if (guessHadFocus) input.focus();
+    }
+  }
+
+  const bind = (id, ev, fn) => $(id)?.addEventListener(ev, fn);
+  bind("btn-secret-manual", "click", guard(async () => {
+    const secret = $("input-secret").value;
+    if (!/^\d{4}$/.test(secret)) {
+      flash("Secret must be exactly 4 digits (0-9)");
+      return;
+    }
+    await api("/api/game/setup", { gameId: g.id, mode: "manual", secret });
+    await refresh();
+  }));
+  bind("input-secret", "keydown", (e) => {
+    if (e.key === "Enter") $("btn-secret-manual").click();
+  });
+  bind("btn-secret-random", "click", guard(async () => {
+    await api("/api/game/setup", { gameId: g.id, mode: "random" });
+    await refresh();
+  }));
+  bind("btn-guess", "click", submitGuess(g));
+  bind("input-guess", "keydown", (e) => {
+    if (e.key === "Enter") submitGuess(g)();
+  });
+}
+
+function submitGuess(g) {
+  return guard(async () => {
+    const el = $("input-guess");
+    const btn = $("btn-guess");
+    const guess = el.value;
+    if (!/^\d{4}$/.test(guess)) {
+      flash("Guess must be exactly 4 digits (0-9)");
+      el.focus();
+      return;
+    }
+    if (btn) btn.disabled = true; // single-flight; a stale double-click is a 403
+    try {
+      await api("/api/game/guess", { gameId: g.id, guess });
+      el.value = ""; // only discard the guess once the server accepted it
+      await refresh();
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+}
+
+/* ------------------------------- startup --------------------------------- */
+
+$("btn-back").addEventListener("click", () => {
+  selectedGameId = null;
+  render();
+});
+
+$("form-register").addEventListener(
+  "submit",
+  guard(async (e) => {
+    e.preventDefault();
+    const username = $("input-username").value.trim();
+    const res = await api("/api/register", { username });
+    token = res.token;
+    localStorage.setItem(TOKEN_KEY, token);
+    connectEvents();
+    await refresh();
+    flash(`Welcome, ${res.username}! You are #${res.userId}.`, true);
+  })
+);
+
+(async function start() {
+  if (token) {
+    try {
+      await refresh();
+      connectEvents();
+      return;
+    } catch {
+      /* stale token or server down — fall through to register */
+    }
+  }
+  showView("register");
+})();

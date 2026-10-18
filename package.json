@@ -1,0 +1,16 @@
+{
+  "name": "number-guessing",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Server-based two-player 4-digit number guessing game (bulls & cows style).",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

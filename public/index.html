@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Number Guessing</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Number Guessing</h1>
+    <div id="me-chip" class="me-chip" hidden></div>
+  </header>
+
+  <div id="flash" class="flash" hidden></div>
+
+  <!-- register / sign-in -->
+  <section id="view-register" class="view" hidden>
+    <div class="card narrow">
+      <h2>Join the game</h2>
+      <p class="muted">Pick a unique username. The system will assign you a number.</p>
+      <form id="form-register" autocomplete="off">
+        <input id="input-username" type="text" maxlength="24" minlength="2"
+               pattern="[A-Za-z0-9_-]{2,24}" required
+               title="Letters, digits, _ or - (2-24 characters)"
+               placeholder="username" />
+        <button type="submit">Register</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- lobby -->
+  <section id="view-lobby" class="view" hidden>
+    <div class="columns">
+      <div class="card">
+        <h2>Players</h2>
+        <ul id="user-list" class="list"></ul>
+        <p id="no-users" class="muted" hidden>Nobody else is registered yet.</p>
+      </div>
+      <div class="card">
+        <h2>Invites</h2>
+        <h3 class="sub">Incoming</h3>
+        <ul id="invites-in" class="list"></ul>
+        <p id="no-invites-in" class="muted" hidden>No incoming invites.</p>
+        <h3 class="sub">Outgoing</h3>
+        <ul id="invites-out" class="list"></ul>
+        <p id="no-invites-out" class="muted" hidden>No pending invites sent.</p>
+      </div>
+      <div class="card">
+        <h2>Games</h2>
+        <ul id="game-list" class="list"></ul>
+        <p id="no-games" class="muted" hidden>No games yet — invite someone to play.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- game -->
+  <section id="view-game" class="view" hidden>
+    <button id="btn-back" class="ghost" type="button">← Lobby</button>
+    <div id="game-board"></div>
+  </section>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
