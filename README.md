@@ -43,6 +43,8 @@ lib/scoring.js       pure sequence parsing + scoring (unit-tested)
 public/              client UI (index.html, app.js, game-inputs.js, style.css)
 test/scoring.test.js node --test suite for the scoring core
 test/game.test.js    e2e smoke test: boots the real server, plays a full game
+test/input-preservation.test.js regression suite for state lost on re-render
+                     (typed digits, caret, focus, single-flight submits)
 ```
 
 ## HTTP API (JSON, token auth via `Authorization: Bearer <token>`)
