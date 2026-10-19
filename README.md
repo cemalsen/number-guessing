@@ -40,7 +40,7 @@ Data lives in server memory only; restarting the server clears all users and gam
 ```
 server.js            HTTP server, routing, sessions, SSE, in-memory store
 lib/scoring.js       pure sequence parsing + scoring (unit-tested)
-public/              client UI (index.html, app.js, style.css)
+public/              client UI (index.html, app.js, game-inputs.js, style.css)
 test/scoring.test.js node --test suite for the scoring core
 test/game.test.js    e2e smoke test: boots the real server, plays a full game
 ```

@@ -6,6 +6,8 @@
  * events without an `event:` field, so every named type is registered via
  * addEventListener in connectEvents(). */
 
+import { restoreInputs, snapshotInputs } from "./game-inputs.js";
+
 const TOKEN_KEY = "number-guessing.token";
 const $ = (id) => document.getElementById(id);
 
@@ -270,11 +272,15 @@ function tilesOf(seq, marks, sm = false) {
 function renderGame(game) {
   const g = game;
 
-  // The board is rebuilt via innerHTML; keep whatever the player has typed
-  // (and their focus) across refreshes that arrive mid-typing.
-  const prevGuess = $("input-guess");
-  const typedGuess = prevGuess ? prevGuess.value : "";
-  const guessHadFocus = document.activeElement?.id === "input-guess";
+  // The board is rebuilt wholesale via innerHTML, which recreates every field
+  // in it. Snapshot the player's in-progress entry — the secret *and* the
+  // guess, with focus and caret — so a refresh that lands mid-typing (the
+  // opponent submitting their sequence pushes game.updated to both players)
+  // cannot erase what they have typed.
+  const typedInputs = snapshotInputs(
+    [...els.gameBoard.querySelectorAll("input")],
+    document.activeElement
+  );
 
   const head = `
     <div class="game-head">
@@ -343,14 +349,7 @@ function renderGame(game) {
   }
 
   els.gameBoard.innerHTML = head + body + history;
-
-  if (typedGuess) {
-    const input = $("input-guess");
-    if (input) {
-      input.value = typedGuess;
-      if (guessHadFocus) input.focus();
-    }
-  }
+  restoreInputs(typedInputs, $);
 
   const bind = (id, ev, fn) => $(id)?.addEventListener(ev, fn);
   bind("btn-secret-manual", "click", guard(async () => {
