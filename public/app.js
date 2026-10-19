@@ -6,7 +6,14 @@
  * events without an `event:` field, so every named type is registered via
  * addEventListener in connectEvents(). */
 
-import { restoreInputs, snapshotInputs } from "./game-inputs.js";
+import {
+  createSubmitLock,
+  focusLookup,
+  restoreFocus,
+  restoreInputs,
+  snapshotFocus,
+  snapshotInputs,
+} from "./game-inputs.js";
 
 const TOKEN_KEY = "number-guessing.token";
 const $ = (id) => document.getElementById(id);
@@ -36,6 +43,42 @@ let pollTimer = null;
 let flashTimer = null;
 
 /* ------------------------------ plumbing -------------------------------- */
+
+// One submit at a time. This lives in JavaScript, not on a button node, because
+// every render replaces the nodes: a `btn.disabled = true` from a click is
+// undone by the next re-render (lobby.updated is broadcast on every
+// registration) and the matching `= false` then writes to a detached node.
+// Controls that opt in with `data-submit` reflect the lock's state on demand.
+// The keyed control the keyboard player is holding a place on. It is armed when
+// a submit *acquires* the lock, not when focus is next read: the line below
+// disables that control, and a disabled element is not focusable, so the browser
+// blurs it immediately and a snapshot taken after that finds nothing.
+let focusKey = null;
+
+// Focus is "nowhere" only when the rebuild or the disable dropped it — never
+// when the player has since moved it on purpose, which must not be overwritten.
+function focusIsLost() {
+  const el = document.activeElement;
+  return !el || el === document.body;
+}
+
+function syncSubmitControls() {
+  if (submitLock.pending) {
+    // Arm before disabling. `?? focusKey` keeps the previous place when focus
+    // sits in a plain field (the guess input has no key) — that field is
+    // restored with its caret by restoreInputs(), so there is nothing to hand
+    // back here and no stale button to grab the keyboard for.
+    focusKey = snapshotFocus(document.activeElement) ?? focusKey;
+  }
+  for (const el of document.querySelectorAll("[data-submit]")) {
+    el.disabled = submitLock.pending;
+  }
+  // Releasing is the first moment the armed control can take focus again.
+  if (!submitLock.pending && focusIsLost()) {
+    restoreFocus(focusKey, focusLookup(document));
+  }
+}
+const submitLock = createSubmitLock(syncSubmitControls);
 
 function stopPolling() {
   if (pollTimer) {
@@ -143,6 +186,19 @@ function showView(name) {
 
 function render() {
   if (!state) return;
+  // Every branch below replaces nodes, so focus is taken before anything is
+  // wiped and handed back afterwards: a keyboard player parked on Invite,
+  // Accept, Cancel or Open otherwise loses their place, and `lobby.updated`
+  // arrives whenever *anyone* registers. Fields inside the board are covered
+  // separately (with their caret) by snapshotInputs/restoreInputs.
+  // While a submit is in flight the focused control is disabled, and a disabled
+  // control is not focusable — so activeElement is `body` here and a plain
+  // snapshot would read "nothing was focused", discarding the place armed at
+  // acquire and leaving nothing to hand back when the lock releases. Keep the
+  // armed key unless this render genuinely sees a keyed control (the player
+  // moved on purpose), and track live focus normally when nothing is pending.
+  const liveKey = snapshotFocus(document.activeElement);
+  if (liveKey || !submitLock.pending) focusKey = liveKey;
   renderMeChip();
   if (selectedGameId && state.games.some((g) => g.id === selectedGameId)) {
     renderGame(state.games.find((g) => g.id === selectedGameId));
@@ -152,6 +208,18 @@ function render() {
     renderLobby();
     showView("lobby");
   }
+  // Order matters: apply the disabled state to the fresh nodes *first*, then
+  // hand focus back. Restoring focus onto a control that is about to be
+  // disabled is pointless — blurring it is what the browser does next, which is
+  // the very loss this is meant to prevent. syncSubmitControls() owns the
+  // hand-back because it is also the lock's release callback: while a request
+  // is in flight the focus cannot land on a disabled control, so `focusKey`
+  // stays armed and the same function retries it the moment the lock releases.
+  syncSubmitControls();
+  // Settled: nothing is in flight, so the position has been handed back (or
+  // legitimately disappeared) and an unrelated click on empty page later must
+  // not resurrect a stale one.
+  if (!submitLock.pending) focusKey = null;
 }
 
 function renderMeChip() {
@@ -159,7 +227,7 @@ function renderMeChip() {
   els.meChip.innerHTML =
     `<span class="name">${esc(state.me.username)}</span>` +
     `<span class="num">#${state.me.userId}</span>` +
-    `<button class="small ghost" id="btn-signout" type="button" title="Forget this device">Sign out</button>`;
+    `<button class="small ghost" id="btn-signout" data-focus-key="signout" type="button" title="Forget this device">Sign out</button>`;
   $("btn-signout").addEventListener("click", () => {
     signedOut();
   });
@@ -180,11 +248,12 @@ function renderLobby() {
     btn.className = "small";
     btn.type = "button";
     btn.textContent = "Invite";
-    btn.addEventListener("click", guard(async () => {
+    btn.dataset.focusKey = `invite:${u.userId}`;
+    btn.addEventListener("click", guard(() => submitLock.run(async () => {
       await api("/api/invite", { to: u.username });
       flash(`Invite sent to ${u.username}`, true);
       await refresh();
-    }));
+    })));
     li.append(btn);
     els.userList.append(li);
   }
@@ -198,18 +267,20 @@ function renderLobby() {
     accept.className = "small";
     accept.type = "button";
     accept.textContent = "Accept";
-    accept.addEventListener("click", guard(async () => {
+    accept.dataset.focusKey = `accept:${inv.id}`;
+    accept.addEventListener("click", guard(() => submitLock.run(async () => {
       await api("/api/invite/respond", { inviteId: inv.id, accept: true });
       await refresh();
-    }));
+    })));
     const decline = document.createElement("button");
     decline.className = "small secondary";
     decline.type = "button";
     decline.textContent = "Decline";
-    decline.addEventListener("click", guard(async () => {
+    decline.dataset.focusKey = `decline:${inv.id}`;
+    decline.addEventListener("click", guard(() => submitLock.run(async () => {
       await api("/api/invite/respond", { inviteId: inv.id, accept: false });
       await refresh();
-    }));
+    })));
     li.append(accept, decline);
     els.invitesIn.append(li);
   }
@@ -224,10 +295,11 @@ function renderLobby() {
     cancel.className = "small secondary";
     cancel.type = "button";
     cancel.textContent = "Cancel";
-    cancel.addEventListener("click", guard(async () => {
+    cancel.dataset.focusKey = `cancel:${inv.id}`;
+    cancel.addEventListener("click", guard(() => submitLock.run(async () => {
       await api("/api/invite/respond", { inviteId: inv.id, accept: false });
       await refresh();
-    }));
+    })));
     li.append(cancel);
     els.invitesOut.append(li);
   }
@@ -248,6 +320,7 @@ function renderLobby() {
     open.className = "small";
     open.type = "button";
     open.textContent = "Open";
+    open.dataset.focusKey = `open:${g.id}`;
     open.addEventListener("click", () => {
       selectedGameId = g.id;
       render();
@@ -299,8 +372,8 @@ function renderGame(game) {
          <div class="secret-row">
            <input id="input-secret" type="text" class="digits" inputmode="numeric" maxlength="4"
                   pattern="\\d{4}" placeholder="0000" autocomplete="off" />
-           <button id="btn-secret-manual" type="button">Set</button>
-           <button id="btn-secret-random" class="secondary" type="button">🎲 Random</button>
+           <button id="btn-secret-manual" type="button" data-submit data-focus-key="secret-manual">Set</button>
+           <button id="btn-secret-random" class="secondary" type="button" data-submit data-focus-key="secret-random">🎲 Random</button>
          </div>`;
   }
 
@@ -310,7 +383,7 @@ function renderGame(game) {
          <div class="guess-row">
            <input id="input-guess" type="text" class="digits" inputmode="numeric" maxlength="4"
                   pattern="\\d{4}" placeholder="0000" autocomplete="off" />
-           <button id="btn-guess" type="button">Guess</button>
+           <button id="btn-guess" type="button" data-submit data-focus-key="guess">Guess</button>
            <span class="muted">Your secret: <span class="secret-tiles">${g.mySecret.map((d) => digitTile(d, "plain", true)).join("")}</span></span>
          </div>`
       : `<div class="turn-banner theirs">${esc(g.opponent.username)} is guessing… <span class="muted">(${g.opponentGuessCount} guesses so far)</span></div>`;
@@ -353,20 +426,29 @@ function renderGame(game) {
 
   const bind = (id, ev, fn) => $(id)?.addEventListener(ev, fn);
   bind("btn-secret-manual", "click", guard(async () => {
-    const secret = $("input-secret").value;
+    const field = $("input-secret");
+    const secret = field?.value ?? "";
     if (!/^\d{4}$/.test(secret)) {
       flash("Secret must be exactly 4 digits (0-9)");
+      field?.focus();
       return;
     }
-    await api("/api/game/setup", { gameId: g.id, mode: "manual", secret });
-    await refresh();
+    // Through the lock: without it a double-click sends a second setup request
+    // that the server rejects with 409 already_set, so the player who just
+    // succeeded is shown an error toast for their own success.
+    await submitLock.run(async () => {
+      await api("/api/game/setup", { gameId: g.id, mode: "manual", secret });
+      await refresh();
+    });
   }));
   bind("input-secret", "keydown", (e) => {
     if (e.key === "Enter") $("btn-secret-manual").click();
   });
   bind("btn-secret-random", "click", guard(async () => {
-    await api("/api/game/setup", { gameId: g.id, mode: "random" });
-    await refresh();
+    await submitLock.run(async () => {
+      await api("/api/game/setup", { gameId: g.id, mode: "random" });
+      await refresh();
+    });
   }));
   bind("btn-guess", "click", submitGuess(g));
   bind("input-guess", "keydown", (e) => {
@@ -376,22 +458,23 @@ function renderGame(game) {
 
 function submitGuess(g) {
   return guard(async () => {
-    const el = $("input-guess");
-    const btn = $("btn-guess");
-    const guess = el.value;
+    const field = $("input-guess");
+    const guess = field?.value ?? "";
     if (!/^\d{4}$/.test(guess)) {
       flash("Guess must be exactly 4 digits (0-9)");
-      el.focus();
+      field?.focus();
       return;
     }
-    if (btn) btn.disabled = true; // single-flight; a stale double-click is a 403
-    try {
+    await submitLock.run(async () => {
       await api("/api/game/guess", { gameId: g.id, guess });
-      el.value = ""; // only discard the guess once the server accepted it
+      // Discard the guess only now that the server accepted it, and write it to
+      // the field that is on screen *now*: a game.updated can rebuild the board
+      // while this request is in flight, and clearing the node the click came
+      // from would leave the digits in front of the player.
+      const live = $("input-guess");
+      if (live) live.value = "";
       await refresh();
-    } finally {
-      if (btn) btn.disabled = false;
-    }
+    });
   });
 }
 
@@ -407,12 +490,14 @@ $("form-register").addEventListener(
   guard(async (e) => {
     e.preventDefault();
     const username = $("input-username").value.trim();
-    const res = await api("/api/register", { username });
-    token = res.token;
-    localStorage.setItem(TOKEN_KEY, token);
-    connectEvents();
-    await refresh();
-    flash(`Welcome, ${res.username}! You are #${res.userId}.`, true);
+    await submitLock.run(async () => {
+      const res = await api("/api/register", { username });
+      token = res.token;
+      localStorage.setItem(TOKEN_KEY, token);
+      connectEvents();
+      await refresh();
+      flash(`Welcome, ${res.username}! You are #${res.userId}.`, true);
+    });
   })
 );
 

@@ -16,7 +16,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { restoreInputs, snapshotInputs } from "../public/game-inputs.js";
+import {
+  createSubmitLock,
+  focusLookup,
+  restoreFocus,
+  restoreInputs,
+  snapshotFocus,
+  snapshotInputs,
+} from "../public/game-inputs.js";
 
 /** Minimal stand-in for an <input type=text>: value, caret, focus. */
 function makeInput(id, { value = "", start = null, end = null } = {}) {
@@ -151,5 +158,277 @@ test("app.js preserves every board input, not a hard-coded one", async () => {
     src,
     /typedGuess/,
     "the per-field special case must not come back"
+  );
+});
+
+/* ---------- structural guards: the rest of the lost-on-re-render class ---------- */
+
+async function readApp() {
+  return readFile(
+    fileURLToPath(new URL("../public/app.js", import.meta.url)),
+    "utf8"
+  );
+}
+
+test("lobby action controls are keyed so focus survives the rebuild", async () => {
+  // renderLobby() empties all four <ul>s and recreates their rows, so the
+  // keyboard focus a player had put on Invite/Accept/Cancel/Open is destroyed.
+  // A stable key on each action control is what makes it restorable.
+  const src = await readApp();
+  assert.match(
+    src,
+    /dataset\.focusKey = /,
+    "each lobby action control must carry a stable focus key"
+  );
+  assert.match(
+    src,
+    /snapshotFocus\(/,
+    "the rebuild must remember which control had focus"
+  );
+  assert.match(
+    src,
+    /restoreFocus\(/,
+    "and hand focus back to the recreated control"
+  );
+});
+
+test("in-flight submits live in JS state, not on a DOM node", async () => {
+  // `btn.disabled = true` guards only the node the click came from. A refresh
+  // (lobby.updated broadcasts on every registration) rebuilds the board and the
+  // replacement button is enabled again, while the request is still running.
+  const src = await readApp();
+  assert.match(
+    src,
+    /createSubmitLock\(/,
+    "the client needs a submit lock that a re-render cannot reset"
+  );
+  assert.ok(
+    (src.match(/submitLock\.run\(/g) || []).length >= 3,
+    "setup, guess and register must all go through the lock"
+  );
+  assert.doesNotMatch(
+    src,
+    /btn\.disabled = false/,
+    "re-enabling a captured node is a no-op once the board has been rebuilt"
+  );
+});
+
+test("post-request writes go to the live node, never a captured one", async () => {
+  // After `await api(...)` the board may have been rebuilt, so a node captured
+  // before the await is detached: clearing it leaves the submitted digits in
+  // the field the player is actually looking at.
+  const src = await readApp();
+  const anchor = src.indexOf("function submitGuess");
+  assert.ok(
+    anchor >= 0,
+    "submitGuess must exist for this guard to assert anything (a -1 slice makes doesNotMatch vacuous)"
+  );
+  const guess = src.slice(anchor);
+  // Invariant, not spelling: the field must be resolved again *after* the
+  // request was issued. Writing through a node captured before the await hits a
+  // detached element whenever a refresh rebuilt the board mid-request.
+  assert.match(
+    guess,
+    /await api\([\s\S]{0,600}\$\("input-guess"\)/,
+    "the guess field must be looked up again by id after the request, before it is cleared"
+  );
+});
+
+/* ---------- behaviour of the focus + submit-lock primitives ---------- */
+
+/** Stand-in for a focusable control the lobby recreates (a button row). */
+function makeControl(focusKey) {
+  return {
+    dataset: focusKey === null ? {} : { focusKey },
+    focusCalls: 0,
+    focus() {
+      this.focusCalls += 1;
+    },
+  };
+}
+
+/** Stand-in container: only [data-focus-key] descendants are visible to it. */
+function container(controls) {
+  return {
+    querySelectorAll: (selector) =>
+      selector === "[data-focus-key]" ? controls : [],
+  };
+}
+
+test("snapshotFocus reads the key off the focused control", () => {
+  const btn = makeControl("invite:1002");
+  assert.equal(snapshotFocus(btn), "invite:1002");
+});
+
+test("snapshotFocus is null when nothing usable had focus", () => {
+  assert.equal(snapshotFocus(null), null, "no active element");
+  assert.equal(snapshotFocus(undefined), null);
+  assert.equal(
+    snapshotFocus(makeControl(null)),
+    null,
+    "a control without a key (e.g. the focused input) is not our concern"
+  );
+});
+
+test("focus on a lobby row returns to the recreated row, not the page top", () => {
+  const before = makeControl("accept:7");
+  const key = snapshotFocus(before);
+
+  // refresh -> renderLobby() empties the <ul> and builds brand new rows
+  const after = [makeControl("invite:1001"), makeControl("accept:7")];
+  restoreFocus(key, focusLookup(container(after)));
+
+  assert.equal(after[0].focusCalls, 0, "an unrelated row must not take focus");
+  assert.equal(after[1].focusCalls, 1, "the row the player was on gets it back");
+});
+
+test("a null focus key never steals the keyboard", () => {
+  const rows = [makeControl("open:1")];
+  let lookedUp = 0;
+  restoreFocus(snapshotFocus(null), (k) => {
+    lookedUp += 1;
+    return focusLookup(container(rows))(k);
+  });
+  assert.equal(lookedUp, 0, "nothing was focused, so nothing may be focused");
+  assert.equal(rows[0].focusCalls, 0);
+});
+
+test("focus whose row legitimately disappeared is skipped", () => {
+  const key = snapshotFocus(makeControl("cancel:9"));
+  const rows = [makeControl("invite:1001")]; // that invite is gone now
+  assert.doesNotThrow(() => restoreFocus(key, focusLookup(container(rows))));
+  assert.equal(rows[0].focusCalls, 0);
+});
+
+test("focusLookup matches the attribute, so keys need no escaping", () => {
+  const weird = makeControl('open:ab"cd:e');
+  const rows = [makeControl("invite:1001"), weird];
+  assert.equal(focusLookup(container(rows))('open:ab"cd:e'), weird);
+  assert.equal(focusLookup(container(rows))("open:missing"), null);
+  assert.equal(focusLookup(null)?.("anything"), undefined ?? null, "no root");
+});
+
+test("the submit lock drops a second request while one is in flight", async () => {
+  const lock = createSubmitLock();
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  let started = 0;
+
+  const first = lock.run(async () => {
+    started += 1;
+    await gate;
+    return "done";
+  });
+  assert.equal(lock.pending, true, "the lock reports the running request");
+
+  const second = await lock.run(async () => {
+    started += 1;
+    return "second";
+  });
+  assert.equal(second, undefined, "the re-entrant submit is dropped, not queued");
+  assert.equal(started, 1, "only the first request ran");
+
+  release();
+  assert.equal(await first, "done", "the first request returns its value");
+  assert.equal(lock.pending, false, "the lock is released afterwards");
+});
+
+test("the lock releases even when the request throws", async () => {
+  const lock = createSubmitLock();
+  await assert.rejects(
+    lock.run(async () => {
+      throw new Error("guess rejected");
+    }),
+    /guess rejected/
+  );
+  assert.equal(lock.pending, false, "a failed submit must not wedge the lock");
+  assert.equal(await lock.run(async () => "ok"), "ok", "submits still work");
+});
+
+test("a throwing state callback cannot wedge the lock", async () => {
+  // The callback only mirrors state onto the DOM; if it throws (a detached
+  // node, a future refactor) every later submit would otherwise be dropped.
+  const lock = createSubmitLock(() => {
+    throw new Error("reflect failed");
+  });
+  assert.equal(await lock.run(async () => "ok"), "ok");
+  assert.equal(lock.pending, false);
+  assert.equal(await lock.run(async () => "again"), "again");
+});
+
+test("the static register button opts into the derived disabled state", async () => {
+  // It is the one submit control that no render ever rebuilds, so the lock has
+  // to reach it where it sits in index.html.
+  const html = await readFile(
+    fileURLToPath(new URL("../public/index.html", import.meta.url)),
+    "utf8"
+  );
+  assert.match(
+    html,
+    /<button type="submit" data-submit>/,
+    "the register button must carry data-submit or it stays clickable mid-request"
+  );
+});
+
+test("no mutating request is issued outside the submit lock", async () => {
+  // A double-click on Invite used to fire a second POST, which the server
+  // rejects with "You already have an unfinished game with X" — so the player
+  // who had just succeeded was shown an error toast for their own success.
+  // The lock is the only guard, so no mutating call may bypass it.
+  const src = await readApp();
+  assert.doesNotMatch(
+    src,
+    /guard\(async[^(]*\(\)\s*=>\s*\{\s*await api\("\/api\/(?!state)/,
+    "a handler must not await a mutating endpoint without submitLock.run()"
+  );
+  const mutating = (src.match(/api\("\/api\/(?!state)/g) || []).length;
+  const locked = (src.match(/submitLock\.run\(/g) || []).length;
+  assert.ok(locked >= mutating, `every mutating call needs a lock (${locked} < ${mutating})`);
+});
+
+test("the keyboard place is armed before the submit disables its control", async () => {
+  // A disabled control is not focusable, so applying `disabled` to the button
+  // the player is standing on blurs it. If the focus key were only read during
+  // the next render it would read `body`, the hand-back on release would have
+  // nothing to restore, and the retry would exist while being provably inert.
+  const src = await readApp();
+  const start = src.indexOf("function syncSubmitControls");
+  assert.ok(start >= 0, "syncSubmitControls must exist for this guard to mean anything");
+  const end = src.indexOf("const submitLock", start);
+  assert.ok(end > start, "the end of syncSubmitControls must be findable");
+  const body = src.slice(start, end);
+
+  const armedAt = body.indexOf("snapshotFocus(document.activeElement)");
+  const disabledAt = body.indexOf("el.disabled = submitLock.pending");
+  assert.ok(armedAt >= 0, "nothing arms the focus key, so focus can never come back");
+  assert.ok(disabledAt >= 0, "the disabled assignment moved; re-read this guard");
+  assert.ok(
+    armedAt < disabledAt,
+    "the focus key must be armed before the control is disabled, not after"
+  );
+});
+
+test("a mid-flight render must not discard the armed keyboard place", async () => {
+  // The refresh issued from inside a submit runs while the focused control is
+  // disabled, so activeElement is `body`. An unconditional re-snapshot there
+  // overwrites the armed key with null and silently un-fixes the case above.
+  const src = await readApp();
+  const start = src.indexOf("function render()");
+  assert.ok(start >= 0, "render() must exist for this guard to mean anything");
+  const end = src.indexOf("\n}", src.indexOf("syncSubmitControls();", start));
+  assert.ok(end > start, "the end of render() must be findable");
+  const body = src.slice(start, end);
+
+  assert.doesNotMatch(
+    body,
+    /focusKey = snapshotFocus\(document\.activeElement\);/,
+    "render() must not overwrite focusKey unconditionally: during an in-flight submit the blur it reads is expected, not empty"
+  );
+  assert.match(
+    body,
+    /if \(liveKey \|\| !submitLock\.pending\) focusKey = liveKey;/,
+    "render() must keep the armed key while a submit is in flight"
   );
 });
