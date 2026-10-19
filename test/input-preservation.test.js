@@ -218,12 +218,18 @@ test("post-request writes go to the live node, never a captured one", async () =
   // before the await is detached: clearing it leaves the submitted digits in
   // the field the player is actually looking at.
   const src = await readApp();
-  const anchor = src.indexOf("function submitGuess");
+  const start = src.indexOf("function submitGuess");
   assert.ok(
-    anchor >= 0,
+    start >= 0,
     "submitGuess must exist for this guard to assert anything (a -1 slice makes doesNotMatch vacuous)"
   );
-  const guess = src.slice(anchor);
+  // Bound the slice to the function body. A slice to end-of-file lets a `$()`
+  // call in *unrelated* later code satisfy the regex, which would report this
+  // guard green while submitGuess itself still cleared a detached node. Every
+  // nested block in this function is indented, so the first column-0 `}` ends it.
+  const end = src.indexOf("\n}", start);
+  assert.ok(end > start, "the end of submitGuess() must be findable");
+  const guess = src.slice(start, end);
   // Invariant, not spelling: the field must be resolved again *after* the
   // request was issued. Writing through a node captured before the await hits a
   // detached element whenever a refresh rebuilt the board mid-request.
