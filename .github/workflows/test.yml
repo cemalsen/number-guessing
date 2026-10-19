@@ -1,0 +1,54 @@
+# Backs the README's "Node >= 18" promise with per-version evidence.
+#
+# The command is `npm test` -> `node --test`, exactly what the README documents:
+# the scoring unit suite plus the e2e suite that boots the real server on an
+# ephemeral port and plays a full game over HTTP/SSE. A green job is therefore
+# evidence that the documented command works on that runtime, not a paraphrase.
+#
+# Why the script takes no directory argument: `node --test test/` aborts with
+# `Cannot find module '<root>/test'` (MODULE_NOT_FOUND) on Node 22.23.3 and
+# 24.22.0, which resolve a bare directory as an entry script instead of a tree to
+# scan. The argument-less form discovers the same three files and passes on
+# 18.20.8, 20.20.2, 22.23.3, 24.22.0 and 26.12.0. Do not "tidy" it back.
+#
+# No install step: the project declares zero dependencies and has no lockfile.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      # One unsupported runtime must not cancel the matrix: the point of this job
+      # is to learn which versions pass, not to get a single red mark.
+      fail-fast: false
+      matrix:
+        # 18 and 20 are past upstream EOL and are listed deliberately: they are
+        # what "Node >= 18" actually asserts, and CI is the only place they can
+        # be exercised. Drop a line here only together with package.json
+        # `engines` and the README claim.
+        node-version: ["18", "20", "22", "24", "26"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Runtime
+        run: node --version && npm --version
+      - name: Test
+        # Runs the manifest command, which is the one the README documents, so
+        # CI and a contributor's terminal can never silently diverge.
+        run: npm test
