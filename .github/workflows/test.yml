@@ -1,4 +1,4 @@
-# Backs the README's "Node >= 18" promise with per-version evidence.
+# Backs the README's "Node >= 22" promise with per-version evidence.
 #
 # The command is `npm test` -> `node --test`, exactly what the README documents:
 # the scoring unit suite plus the e2e suite that boots the real server on an
@@ -36,11 +36,11 @@ jobs:
       # is to learn which versions pass, not to get a single red mark.
       fail-fast: false
       matrix:
-        # 18 and 20 are past upstream EOL and are listed deliberately: they are
-        # what "Node >= 18" actually asserts, and CI is the only place they can
-        # be exercised. Drop a line here only together with package.json
-        # `engines` and the README claim.
-        node-version: ["18", "20", "22", "24", "26"]
+        # Mirrors package.json `engines.node` and the README claim exactly.
+        # 18 and 20 were dropped when the floor moved to 22: upstream EOL
+        # 2025-04-30 and 2026-04-30, so the project no longer claims them.
+        # Move the floor in all three places together, or in none.
+        node-version: ["22", "24", "26"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

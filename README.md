@@ -1,7 +1,7 @@
 # Number Guessing
 
 A server-based, two-player number-guessing game (bulls & cows style) with a user system,
-invites, and turn-based play. Zero dependencies — plain Node.js (>= 18) on the server,
+invites, and turn-based play. Zero dependencies — plain Node.js (>= 22) on the server,
 vanilla HTML/CSS/JS on the client.
 
 ## Run
